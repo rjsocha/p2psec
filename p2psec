@@ -6,6 +6,7 @@ _ATH_KEY="0x4375b71c31b56e7d00b4cdba0f05dca06c1167e0fe3c54a4698600d3a28d0cee"
 _ENC_KEY="0xa1e54b1bfede73b60467cfce750ff7a9294f279f1ecfa55b4edb56a3987a9c2a"
 _ATH_ALG="sha256"
 _ENC_ALG="twofish"
+_RIF="p2sec0"
 
 _echo() {
 	echo "$@"
@@ -20,22 +21,34 @@ local _ip
 	return 1
 }
 
+_check_route_if() {
+	ip link show dev ${_RIF} &>/dev/null
+	return $?
+}
+
+_create_route_if() {
+	ip link add name ${_RIF} type dummy
+	return $?
+}
+
+_up_route_if() {
+	ip link set dev ${_RIF} up
+	return $?
+}
+
+_remove_route_if() {
+	ip link delete dev ${_RIF} type dummy
+	return $?
+}
+
 _default=$(ip -o route show default 2>/dev/null)
 if [[ -z ${_default} ]]
 then
 	echo "Unable to locate default gateway..."
 	exit 1
 fi
-_eth0=$(echo "${_default}" | grep -Po '(?<=(dev ))\S+')
+_gwif=$(echo "${_default}" | grep -Po '(?<=(dev ))\S+')
 _me=$(echo "${_default}" | grep -Po '(?<=(src ))[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
-if [[ -z ${_eth0} ]]
-then
-	echo "Unable to locate default's getway interface..."
-	exit 1
-fi
-_echo "ME: $_me"
-_echo "IF: $_eth0"
-
 # Check config
 _me_found=0
 _me_local=""
@@ -66,7 +79,12 @@ for __peer in $_PEERS
 do
 	__peer_ext="${__peer%:*}"
 	__peer_int="${__peer#*:}"
-	[[ ${__peer_ext} != ${_me} ]] && _echo -n "${__peer_ext} "
+	if [[ ${__peer_ext} != ${_me} ]] 
+	then
+		_echo -n "${__peer_ext} "
+	else
+		_echo -n "+${__peer_ext} "
+	fi
 done
 _echo
 if [[ $1 == "stop" ]]
@@ -87,12 +105,20 @@ then
 	done
 	exit 0
 fi
+if ! _check_route_if 
+then
+	if ! _create_route_if
+	then
+		_echo "Unable to create virtual route interface..."
+		exit 10
+	fi
+fi
+_up_route_if
 if ! _check_lo_addr "${_me_local}/32"
 then
 	ip addr add "${_me_local}/32" dev lo
 	echo "The local IP address ${_me_local}/32 was added to lo interface."
 fi
-_spi="$_SPI"
 ip xfrm state  flush
 ip xfrm policy flush
 for __peer in $_PEERS
@@ -112,5 +138,5 @@ do
 	ip xfrm policy add src ${_me_local}/32 dst ${__peer_int}/32 dir out tmpl src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel
 	ip xfrm policy add dst ${_me_local}/32 src ${__peer_int}/32 dir in  tmpl dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel
 	ip route del ${__peer_int}/32 &>/dev/null
-	ip route add ${__peer_int}/32 dev ${_eth0} src ${_me_local}
+	ip route add ${__peer_int}/32 dev ${_RIF} src ${_me_local}
 done
