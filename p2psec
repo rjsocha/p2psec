@@ -1,0 +1,116 @@
+#!/bin/bash
+_PEERS="100.100.240.89:192.168.10.1 100.100.241.178:192.168.10.2 100.100.254.45:192.168.10.3 100.100.253.30:192.168.10.4 100.100.250.122:192.168.10.5 100.100.247.169:192.168.10.6"
+# generate 256 bit key:
+# dd if=/dev/urandom count=32 bs=1 2>/dev/null | xxd -p -c 64
+_ATH_KEY="0x4375b71c31b56e7d00b4cdba0f05dca06c1167e0fe3c54a4698600d3a28d0cee"
+_ENC_KEY="0xa1e54b1bfede73b60467cfce750ff7a9294f279f1ecfa55b4edb56a3987a9c2a"
+_ATH_ALG="sha256"
+_ENC_ALG="twofish"
+
+_echo() {
+	echo "$@"
+}
+
+_check_lo_addr() {
+local _ip
+	for _ip in $(ip -o -4 addr show dev lo | grep -Po '(?<=(inet ))[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+')
+	do
+		[[ $_ip == $1 ]] && return 0
+	done
+	return 1
+}
+
+_default=$(ip -o route show default 2>/dev/null)
+if [[ -z ${_default} ]]
+then
+	echo "Unable to locate default gateway..."
+	exit 1
+fi
+_eth0=$(echo "${_default}" | grep -Po '(?<=(dev ))\S+')
+_me=$(echo "${_default}" | grep -Po '(?<=(src ))[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+if [[ -z ${_eth0} ]]
+then
+	echo "Unable to locate default's getway interface..."
+	exit 1
+fi
+_echo "ME: $_me"
+_echo "IF: $_eth0"
+
+# Check config
+_me_found=0
+_me_local=""
+for __peer in $_PEERS
+do
+	if ! [[ ${__peer} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+	then
+		echo "Incorrect ip pair for peer: ${__peer}"
+		exit 10
+	fi
+	__peer_ext="${__peer%:*}"
+	__peer_int="${__peer#*:}"
+	if [[ ${__peer_ext} == ${_me} ]]
+	then
+		_me_found=1
+		_me_local="${__peer_int}"
+	fi
+done
+
+if [[ $_me_found -eq 0 ]]
+then
+	echo "Unable to locate this host ip address on peers list..."
+	exit 15
+fi
+
+_echo -n "PEERS: "
+for __peer in $_PEERS
+do
+	__peer_ext="${__peer%:*}"
+	__peer_int="${__peer#*:}"
+	[[ ${__peer_ext} != ${_me} ]] && _echo -n "${__peer_ext} "
+done
+_echo
+if [[ $1 == "stop" ]]
+then
+	ip xfrm state flush
+	ip xfrm policy flush
+	if _check_lo_addr "${_me_local}/32"
+	then
+		ip addr del "${_me_local}/32" dev lo
+		echo "The local IP address ${_me_local}/32 was removed from lo interface."
+	fi
+	for __peer in $_PEERS
+	do
+		__peer_ext="${__peer%:*}"
+		__peer_int="${__peer#*:}"
+		[[ ${__peer_ext} == ${_me} ]] && continue
+		ip route del ${__peer_int}/32 &>/dev/null
+	done
+	exit 0
+fi
+if ! _check_lo_addr "${_me_local}/32"
+then
+	ip addr add "${_me_local}/32" dev lo
+	echo "The local IP address ${_me_local}/32 was added to lo interface."
+fi
+_spi="$_SPI"
+ip xfrm state  flush
+ip xfrm policy flush
+for __peer in $_PEERS
+do
+	_spi=$(printf "0x%x" $(( ${_spi} + 1 )))
+	__peer_ext="${__peer%:*}"
+	__peer_int="${__peer#*:}"
+	[[ ${__peer_ext} == ${_me} ]] && continue
+	# calculate spi
+	IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
+	IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
+	_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
+	_spi=$(printf "0x%0x" "$_spi")
+	echo "Creating ipsec link from ${_me} to ${__peer_ext} (${_me_local}/32 -> ${__peer_int}/32) SPI: ${_spi}"	
+	ip xfrm state  add src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
+	ip xfrm state  add dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
+	ip xfrm policy add src ${_me_local}/32 dst ${__peer_int}/32 dir out tmpl src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel
+	ip xfrm policy add dst ${_me_local}/32 src ${__peer_int}/32 dir in  tmpl dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel
+	ip route del ${__peer_int}/32 &>/dev/null
+	ip route add ${__peer_int}/32 dev ${_eth0} src ${_me_local}
+done
