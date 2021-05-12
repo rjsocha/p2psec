@@ -94,8 +94,8 @@ then
 	exit 15
 fi
 
+
 IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
-_check_route_if && _remove_route_if
 for __peer in $_PEERS
 do
 	__peer_ext="${__peer%:*}"
@@ -116,6 +116,7 @@ iptables -D INPUT -p esp -j DROP &>/dev/null
 if [[ $1 == "stop" ]] 
 then
 	_check_lo_addr "${_me_local}/32" && ip addr delete "${_me_local}/32" dev lo
+	_check_route_if && _remove_route_if
 	exit 0
 fi
 
