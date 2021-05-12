@@ -11,7 +11,7 @@ usage:
 
 define PEERS in /etc/default/p2psec
 
-in the format:
+the format is:
   ip1:internal_ip1 ip2:internal_ip2 ipN:internal_ipN
   
   where ip1,ip2 - peers ip addresses
