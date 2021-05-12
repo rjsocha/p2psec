@@ -1,0 +1,9 @@
+Package: p2psec
+Version: 0.2-1
+Section: admin
+Priority: optional
+Architecture: all
+Depends: iproute2, iptables
+Maintainer: Robert Socha <socha@socha.it>
+Homepage: https://github.com/rjsocha/p2psec
+Description: p2psec service

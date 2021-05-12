@@ -1,0 +1,14 @@
+[Unit]
+Description=p2psec service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/p2psec
+ExecStart=/sbin/p2psec
+ExecStop=/sbin/p2psec stop
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

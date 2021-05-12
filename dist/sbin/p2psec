@@ -1,12 +1,32 @@
 #!/bin/bash
-_PEERS="100.100.240.89:192.168.10.1 100.100.241.178:192.168.10.2 100.100.254.45:192.168.10.3 100.100.253.30:192.168.10.4 100.100.250.122:192.168.10.5 100.100.247.169:192.168.10.6"
+# Robert Socha 2021/05
+# v0.2
+# License: public domain
+
+if [[ -z $PEERS ]]
+then
+	echo "Missing PEERS env config..."
+	exit 1
+fi
+if [[ -z $AUTH_KEY ]]
+then
+	echo "Missing AUTH_KEY env config..."
+	exit 1
+fi
+if [[ -z $ENC_KEY ]]
+then
+	echo "Missing ENC_KEY env config..."
+	exit 1
+fi
+
+_PEERS="$PEERS"
 # generate 256 bit key:
 # dd if=/dev/urandom count=32 bs=1 2>/dev/null | xxd -p -c 64
-_ATH_KEY="0x4375b71c31b56e7d00b4cdba0f05dca06c1167e0fe3c54a4698600d3a28d0cee"
-_ENC_KEY="0xa1e54b1bfede73b60467cfce750ff7a9294f279f1ecfa55b4edb56a3987a9c2a"
-_ATH_ALG="sha256"
-_ENC_ALG="twofish"
-_RIF="p2sec0"
+_ATH_KEY="$AUTH_KEY"
+_ENC_KEY="$ENC_KEY"
+_ATH_ALG="${AUTH_ALG:-sha256}"
+_ENC_ALG="${ENC_ALG:-twofish}"
+_RIF="${P2P_IF:-p2psec0}"
 
 _echo() {
 	echo "$@"
@@ -44,7 +64,7 @@ _remove_route_if() {
 _default=$(ip -o route show default 2>/dev/null)
 if [[ -z ${_default} ]]
 then
-	echo "Unable to locate default gateway..."
+	_echo "Unable to locate default gateway..."
 	exit 1
 fi
 _gwif=$(echo "${_default}" | grep -Po '(?<=(dev ))\S+')
@@ -56,7 +76,7 @@ for __peer in $_PEERS
 do
 	if ! [[ ${__peer} =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 	then
-		echo "Incorrect ip pair for peer: ${__peer}"
+		_echo "Incorrect ip pair for peer: ${__peer}"
 		exit 10
 	fi
 	__peer_ext="${__peer%:*}"
@@ -70,8 +90,33 @@ done
 
 if [[ $_me_found -eq 0 ]]
 then
-	echo "Unable to locate this host ip address on peers list..."
+	_echo "Unable to locate this host ip address on peers list..."
 	exit 15
+fi
+
+IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
+_check_route_if && _remove_route_if
+for __peer in $_PEERS
+do
+	__peer_ext="${__peer%:*}"
+	__peer_int="${__peer#*:}"
+	[[ ${__peer_ext} == ${_me} ]] && continue
+	# calculate spi
+	IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
+	_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
+	_spi=$(printf "0x%0x" "$_spi")
+	ip xfrm policy delete src ${_me_local}/32 dst ${__peer_int}/32 dir out &>/dev/null
+	ip xfrm policy delete dst ${_me_local}/32 src ${__peer_int}/32 dir in  &>/dev/null
+	ip xfrm state  delete src ${_me} dst ${__peer_ext} proto esp spi ${_spi} &>/dev/null
+	ip xfrm state  delete  dst ${_me} src ${__peer_ext} proto esp spi ${_spi} &>/dev/null
+	ip route del ${__peer_int}/32 &>/dev/null
+	iptables -D INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT &>/dev/null
+done
+iptables -D INPUT -p esp -j DROP &>/dev/null
+if [[ $1 == "stop" ]] 
+then
+	_check_lo_addr "${_me_local}/32" && ip addr delete "${_me_local}/32" dev lo
+	exit 0
 fi
 
 _echo -n "PEERS: "
@@ -87,24 +132,6 @@ do
 	fi
 done
 _echo
-if [[ $1 == "stop" ]]
-then
-	ip xfrm state flush
-	ip xfrm policy flush
-	if _check_lo_addr "${_me_local}/32"
-	then
-		ip addr del "${_me_local}/32" dev lo
-		echo "The local IP address ${_me_local}/32 was removed from lo interface."
-	fi
-	for __peer in $_PEERS
-	do
-		__peer_ext="${__peer%:*}"
-		__peer_int="${__peer#*:}"
-		[[ ${__peer_ext} == ${_me} ]] && continue
-		ip route del ${__peer_int}/32 &>/dev/null
-	done
-	exit 0
-fi
 if ! _check_route_if 
 then
 	if ! _create_route_if
@@ -117,26 +144,23 @@ _up_route_if
 if ! _check_lo_addr "${_me_local}/32"
 then
 	ip addr add "${_me_local}/32" dev lo
-	echo "The local IP address ${_me_local}/32 was added to lo interface."
+	_echo "The local IP address ${_me_local}/32 was added to the lo interface."
 fi
-ip xfrm state  flush
-ip xfrm policy flush
+iptables -I INPUT -p esp -j DROP
 for __peer in $_PEERS
 do
-	_spi=$(printf "0x%x" $(( ${_spi} + 1 )))
 	__peer_ext="${__peer%:*}"
 	__peer_int="${__peer#*:}"
 	[[ ${__peer_ext} == ${_me} ]] && continue
 	# calculate spi
-	IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
 	IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
 	_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
 	_spi=$(printf "0x%0x" "$_spi")
-	echo "Creating ipsec link from ${_me} to ${__peer_ext} (${_me_local}/32 -> ${__peer_int}/32) SPI: ${_spi}"	
+	_echo "Creating ipsec link from ${_me} to ${__peer_ext} (${_me_local}/32 -> ${__peer_int}/32) SPI: ${_spi}"	
 	ip xfrm state  add src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
 	ip xfrm state  add dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
 	ip xfrm policy add src ${_me_local}/32 dst ${__peer_int}/32 dir out tmpl src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel
 	ip xfrm policy add dst ${_me_local}/32 src ${__peer_int}/32 dir in  tmpl dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel
-	ip route del ${__peer_int}/32 &>/dev/null
 	ip route add ${__peer_int}/32 dev ${_RIF} src ${_me_local}
+	iptables -I INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT
 done

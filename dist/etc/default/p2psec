@@ -1,0 +1,4 @@
+# generate 256 bit key: dd if=/dev/urandom count=32 bs=1 2>/dev/null | xxd -p -c 64
+#AUTH_KEY="0x78b292256787ca2e22dd441ca75f7ca8609b7ace29e739ef62da216990963d28"
+#ENC_KEY="0xb5043c90642c2600bab2abfd505c7460a99b2afcb599ab77a9ad8086b25f7780"
+PEERS=""
