@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/default/p2psec
-ExecStart=/sbin/p2psec start
+ExecStart=/sbin/p2psec apply
 ExecStop=/sbin/p2psec stop
 RemainAfterExit=true
 

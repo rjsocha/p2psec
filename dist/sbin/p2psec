@@ -6,7 +6,7 @@
 _CONFIG="/etc/default/p2psec"
 
 _usage() {
-	echo "Usage: p2psec start|stop|keygen|generate-keys"
+	echo "Usage: p2psec apply|stop|keygen|generate-keys"
 }
 
 if [[ -z "$1" ]]
@@ -156,30 +156,35 @@ then
 	exit 15
 fi
 
-IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
-for __peer in $_PEERS
-do
-	__peer_ext="${__peer%:*}"
-	__peer_int="${__peer#*:}"
-	[[ ${__peer_ext} == ${_me} ]] && continue
-	# calculate spi
-	IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
-	_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
-	_spi=$(printf "0x%0x" "$_spi")
-	ip xfrm policy delete src ${_me_local}/32 dst ${__peer_int}/32 dir out &>/dev/null
-	ip xfrm policy delete dst ${_me_local}/32 src ${__peer_int}/32 dir in  &>/dev/null
-	ip xfrm state  delete src ${_me} dst ${__peer_ext} proto esp spi ${_spi} &>/dev/null
-	ip xfrm state  delete  dst ${_me} src ${__peer_ext} proto esp spi ${_spi} &>/dev/null
-	ip route del ${__peer_int}/32 &>/dev/null
+if [[ "$1" == "stop" ]] || [[ "$1" == "apply" ]]
+then
+	IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
+	for __peer in $_PEERS
+	do
+		__peer_ext="${__peer%:*}"
+		__peer_int="${__peer#*:}"
+		[[ ${__peer_ext} == ${_me} ]] && continue
+		# calculate spi
+		IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
+		_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
+		_spi=$(printf "0x%0x" "$_spi")
+		ip xfrm policy delete src ${_me_local}/32 dst ${__peer_int}/32 dir out &>/dev/null
+		ip xfrm policy delete dst ${_me_local}/32 src ${__peer_int}/32 dir in  &>/dev/null
+		ip xfrm state  delete src ${_me} dst ${__peer_ext} proto esp spi ${_spi} &>/dev/null
+		ip xfrm state  delete  dst ${_me} src ${__peer_ext} proto esp spi ${_spi} &>/dev/null
+		ip route del ${__peer_int}/32 &>/dev/null
+		if [[ ${IPTABLES} -eq 1 ]]
+		then
+			iptables -D INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT &>/dev/null
+		fi
+	done
+
 	if [[ ${IPTABLES} -eq 1 ]]
 	then
-		iptables -D INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT &>/dev/null
+		iptables -D INPUT -p esp -j DROP &>/dev/null
 	fi
-done
-if [[ ${IPTABLES} -eq 1 ]]
-then
-	iptables -D INPUT -p esp -j DROP &>/dev/null
 fi
+
 if [[ $1 == "stop" ]] 
 then
 	_check_lo_addr "${_me_local}/32" && ip addr delete "${_me_local}/32" dev lo
@@ -187,7 +192,7 @@ then
 	exit 0
 fi
 
-if [[ "$1" == "start" ]]
+if [[ "$1" == "apply" ]]
 then
 	_echo -n "PEERS: "
 	for __peer in $_PEERS
