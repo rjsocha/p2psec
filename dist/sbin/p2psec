@@ -1,7 +1,58 @@
 #!/bin/bash
-# Robert Socha 2021/05
-# v0.2
+# Robert Socha 2021/05,2021/09
+# v0.22
 # License: public domain
+
+_CONFIG="/etc/default/p2psec"
+
+_usage() {
+	echo "Usage: p2psec start|stop|keygen|generate-keys"
+}
+
+if [[ -z "$1" ]]
+then
+	_usage
+	exit 1
+fi
+
+if [[ "$1" == "keygen" ]]
+then
+	echo "0x$(dd if=/dev/urandom count=32 bs=1 status=none | od -v -t x -w32 -An --endian=big | tr -d ' ')"
+	exit 0
+fi
+
+if [[ "$1" == "generate-keys" ]]
+then
+	echo "AUTH_KEY=\"0x$(dd if=/dev/urandom count=32 bs=1 status=none | od -v -t x -w32 -An --endian=big | tr -d ' ')\""
+	echo "ENC_KEY=\"0x$(dd if=/dev/urandom count=32 bs=1 status=none | od -v -t x -w32 -An --endian=big | tr -d ' ')\""
+	exit 0
+fi
+
+unset PEERS
+unset AUTH_KEY
+unset ENC_KEY
+unset AUTH_ALG
+unset ENC_ALG
+unset IPTABLES
+unset P2P_IF
+
+if [[ ! -f ${_CONFIG} ]]
+then
+	echo "Missing configuration file ${_CONFIG}"
+	exit 1
+fi
+
+if [[ ! -r ${_CONFIG} ]]
+then
+	echo "Configuration file is not readable..."
+	exit 1
+fi
+
+if [[ -z $(find "${_CONFIG}" -uid 0 -gid 0 -perm 0600 -o -perm 0400) ]]
+then
+	echo "Wrong owner,group or permisions for ${_CONFIG}"
+	exit 1
+fi
 
 if [[ -z $PEERS ]] && [[ -s /etc/default/p2psec ]]
 then
@@ -24,9 +75,15 @@ then
 	exit 1
 fi
 
+case "${IPTABLES}" in
+	1|true|yes|on)
+		IPTABLES=1
+		;;
+	*)
+		IPTABLES=0
+esac
+
 _PEERS="$PEERS"
-# generate 256 bit key:
-# dd if=/dev/urandom count=32 bs=1 2>/dev/null | xxd -p -c 64
 _ATH_KEY="$AUTH_KEY"
 _ENC_KEY="$ENC_KEY"
 _ATH_ALG="${AUTH_ALG:-sha256}"
@@ -39,7 +96,7 @@ _echo() {
 
 _check_lo_addr() {
 local _ip
-	for _ip in $(ip -o -4 addr show dev lo | grep -Po '(?<=(inet ))[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+')
+	for _ip in $(LANG=C ip -o -4 addr show dev lo | grep -Po '(?<=(inet ))[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+')
 	do
 		[[ $_ip == $1 ]] && return 0
 	done
@@ -47,22 +104,22 @@ local _ip
 }
 
 _check_route_if() {
-	ip link show dev ${_RIF} &>/dev/null
+	ip link show dev "${_RIF}" &>/dev/null
 	return $?
 }
 
 _create_route_if() {
-	ip link add name ${_RIF} type dummy
+	ip link add name "${_RIF}" type dummy
 	return $?
 }
 
 _up_route_if() {
-	ip link set dev ${_RIF} up
+	ip link set dev "${_RIF}" up
 	return $?
 }
 
 _remove_route_if() {
-	ip link delete dev ${_RIF} type dummy
+	ip link delete dev "${_RIF}" type dummy
 	return $?
 }
 
@@ -99,7 +156,6 @@ then
 	exit 15
 fi
 
-
 IFS=. read a1 a2 a3 a4 <<< "${_me_local}"
 for __peer in $_PEERS
 do
@@ -115,9 +171,15 @@ do
 	ip xfrm state  delete src ${_me} dst ${__peer_ext} proto esp spi ${_spi} &>/dev/null
 	ip xfrm state  delete  dst ${_me} src ${__peer_ext} proto esp spi ${_spi} &>/dev/null
 	ip route del ${__peer_int}/32 &>/dev/null
-	iptables -D INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT &>/dev/null
+	if [[ ${IPTABLES} -eq 1 ]]
+	then
+		iptables -D INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT &>/dev/null
+	fi
 done
-iptables -D INPUT -p esp -j DROP &>/dev/null
+if [[ ${IPTABLES} -eq 1 ]]
+then
+	iptables -D INPUT -p esp -j DROP &>/dev/null
+fi
 if [[ $1 == "stop" ]] 
 then
 	_check_lo_addr "${_me_local}/32" && ip addr delete "${_me_local}/32" dev lo
@@ -125,48 +187,62 @@ then
 	exit 0
 fi
 
-_echo -n "PEERS: "
-for __peer in $_PEERS
-do
-	__peer_ext="${__peer%:*}"
-	__peer_int="${__peer#*:}"
-	if [[ ${__peer_ext} != ${_me} ]] 
-	then
-		_echo -n "${__peer_ext} "
-	else
-		_echo -n "+${__peer_ext} "
-	fi
-done
-_echo
-if ! _check_route_if 
+if [[ "$1" == "start" ]]
 then
-	if ! _create_route_if
+	_echo -n "PEERS: "
+	for __peer in $_PEERS
+	do
+		__peer_ext="${__peer%:*}"
+		__peer_int="${__peer#*:}"
+		if [[ ${__peer_ext} != ${_me} ]] 
+		then
+			_echo -n "${__peer_ext} "
+		else
+			_echo -n "+${__peer_ext} "
+		fi
+	done
+	_echo
+	if ! _check_route_if 
 	then
-		_echo "Unable to create virtual route interface..."
-		exit 10
+		if ! _create_route_if
+		then
+			_echo "Unable to create virtual route interface..."
+			exit 10
+		fi
 	fi
+	_up_route_if
+	if ! _check_lo_addr "${_me_local}/32"
+	then
+		ip addr add "${_me_local}/32" dev lo
+		_echo "The local IP address ${_me_local}/32 was added to the lo interface."
+	fi
+
+	if [[ ${IPTABLES} -eq 1 ]]
+	then
+		iptables -I INPUT -p esp -j DROP
+	fi
+
+	for __peer in $_PEERS
+	do
+		__peer_ext="${__peer%:*}"
+		__peer_int="${__peer#*:}"
+		[[ ${__peer_ext} == ${_me} ]] && continue
+		# calculate spi
+		IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
+		_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
+		_spi=$(printf "0x%0x" "$_spi")
+		_echo "Creating ipsec link from ${_me} to ${__peer_ext} (${_me_local}/32 -> ${__peer_int}/32) SPI: ${_spi}"	
+		ip xfrm state  add src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
+		ip xfrm state  add dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
+		ip xfrm policy add src ${_me_local}/32 dst ${__peer_int}/32 dir out tmpl src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel
+		ip xfrm policy add dst ${_me_local}/32 src ${__peer_int}/32 dir in  tmpl dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel
+		ip route add ${__peer_int}/32 dev ${_RIF} src ${_me_local}
+		if [[ ${IPTABLES} -eq 1 ]]
+		then
+			iptables -I INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT
+		fi
+	done
+	exit 0
 fi
-_up_route_if
-if ! _check_lo_addr "${_me_local}/32"
-then
-	ip addr add "${_me_local}/32" dev lo
-	_echo "The local IP address ${_me_local}/32 was added to the lo interface."
-fi
-iptables -I INPUT -p esp -j DROP
-for __peer in $_PEERS
-do
-	__peer_ext="${__peer%:*}"
-	__peer_int="${__peer#*:}"
-	[[ ${__peer_ext} == ${_me} ]] && continue
-	# calculate spi
-	IFS=. read b1 b2 b3 b4 <<< "${__peer_int}"
-	_spi=$(( ($a1^$b1) << 24 | ($a2^$b2) << 16 | ($a3^$b3) << 8 | ($a4^$b4) ))
-	_spi=$(printf "0x%0x" "$_spi")
-	_echo "Creating ipsec link from ${_me} to ${__peer_ext} (${_me_local}/32 -> ${__peer_int}/32) SPI: ${_spi}"	
-	ip xfrm state  add src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
-	ip xfrm state  add dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel auth ${_ATH_ALG} ${_ATH_KEY} enc ${_ENC_ALG} ${_ENC_KEY}
-	ip xfrm policy add src ${_me_local}/32 dst ${__peer_int}/32 dir out tmpl src ${_me} dst ${__peer_ext} proto esp spi ${_spi} mode tunnel
-	ip xfrm policy add dst ${_me_local}/32 src ${__peer_int}/32 dir in  tmpl dst ${_me} src ${__peer_ext} proto esp spi ${_spi} mode tunnel
-	ip route add ${__peer_int}/32 dev ${_RIF} src ${_me_local}
-	iptables -I INPUT -p esp -s ${__peer_ext} -d ${_me} -j ACCEPT
-done
+_usage
+exit 1
