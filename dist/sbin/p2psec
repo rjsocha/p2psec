@@ -1,6 +1,6 @@
 #!/bin/bash
 # Robert Socha 2021/05,2021/09
-# v0.22
+# v0.24
 # License: public domain
 
 _CONFIG="/etc/default/p2psec"
